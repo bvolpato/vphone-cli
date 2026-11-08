@@ -26,6 +26,13 @@ jobs:
       - name: Build iOS worker
         run: |
           set -euo pipefail
+          # The browser asset URL returns HTTP 504; the immutable API asset works.
+          # SwiftPM's URL mirror retains the dependency manifest's checksum.
+          export SWIFTPM_MIRROR_CONFIG="$RUNNER_TEMP/guest-worker-mirrors.json"
+          jq -n \
+            --arg original https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip \
+            --arg mirror https://api.github.com/repos/Lakr233/libarchive.xcframework/releases/assets/544687728.zip \
+            '{version:1,object:[{original:$original,mirror:$mirror}]}' > "$SWIFTPM_MIRROR_CONFIG"
           xcodebuild -project VPhoneDaemon/VPhoneDaemon.xcodeproj \
             -scheme vphoned -configuration Release -sdk iphoneos \
             -derivedDataPath .build/GuestWorker -jobs 4 \
