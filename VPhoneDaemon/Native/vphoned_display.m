@@ -462,14 +462,18 @@ static void vpDisplaySample(NSString *frontmostBundleID, NSMutableDictionary *ca
 }
 
 NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
+    dispatch_time_t entered = dispatch_time(DISPATCH_TIME_NOW, 0);
+    dispatch_time_t completionDeadline = dispatch_time(entered, 1500 * NSEC_PER_MSEC);
     if (NSThread.isMainThread) {
         return vpDisplayUnavailable(@"Asynchronous layout observation requires a background caller", @"main_thread_caller");
     }
     static dispatch_semaphore_t slot;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ slot = dispatch_semaphore_create(1); });
-    if (dispatch_semaphore_wait(slot, DISPATCH_TIME_NOW) != 0) {
-        return vpDisplayUnavailable(@"Another layout capture is pending or running", @"busy");
+    // Briefly serialize ordinary event/RPC overlap without extending the
+    // single overall response deadline or waiting on the main thread.
+    if (dispatch_semaphore_wait(slot, dispatch_time(entered, 300 * NSEC_PER_MSEC)) != 0) {
+        return vpDisplayUnavailable(@"Layout capture admission deadline exceeded", @"busy");
     }
     NSLock *lock = [NSLock new];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
@@ -501,7 +505,7 @@ NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
     // the caller's foreground reads. Direct main-thread callers are rejected.
     // Once a private call starts it cannot be forcibly cancelled; keep the slot
     // occupied until that capture finishes.
-    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) != 0) {
+    if (dispatch_semaphore_wait(done, completionDeadline) != 0) {
         [lock lock];
         cancelled = YES;
         BOOL running = started;
