@@ -19,34 +19,28 @@ jobs:
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      SWIFTPM_NETRC_DATA: "machine api.github.com login x-access-token password ${{ github.token }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure immutable binary artifact mirrors
+      - name: Verify pinned public artifact access
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/pinned-public-artifact-probe"
+          mkdir -p "$probe"
+          gh release download storage.46A6477C-63BC-448A-8EB1-D7A06EC9407D \
+            --repo Lakr233/AppleMobileDeviceLibrary \
+            --pattern libplist.xcframework.zip --dir "$probe"
+          printf '56fa88f3bd1f847ab8f4053728f93c099ee78032d8cf5b4c38c210a270b22125  %s\n' \
+            "$probe/libplist.xcframework.zip" | shasum -a 256 -c -
+
+      - name: Use original pinned artifact URLs
         run: |
           set -euo pipefail
           mirror_config="$RUNNER_TEMP/bundle-mirrors.json"
-          jq -n \
-            --arg run "$GITHUB_RUN_ID" \
-            --arg amdl https://github.com/Lakr233/AppleMobileDeviceLibrary/releases/download/storage.46A6477C-63BC-448A-8EB1-D7A06EC9407D \
-            '{version:1,object:[
-              {original:"https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip",
-               mirror:"https://api.github.com/repos/Lakr233/libarchive.xcframework/releases/assets/544687728.zip"},
-              {original:($amdl+"/libplist.xcframework.zip"),
-               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647013.zip"},
-              {original:($amdl+"/libimobiledevice.xcframework.zip"),
-               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647021.zip"},
-              {original:($amdl+"/libimobiledevice_glue.xcframework.zip"),
-               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647023.zip"},
-              {original:($amdl+"/libusbmuxd.xcframework.zip"),
-               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647014.zip"},
-              {original:($amdl+"/libtatsu.xcframework.zip"),
-               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647020.zip"},
-              {original:"https://github.com/Lakr233/openssl-spm/releases/download/storage.3.6.2/libssl.xcframework.zip",
-               mirror:"https://api.github.com/repos/Lakr233/openssl-spm/releases/assets/391356290.zip"}
-            ]} | .object |= map(.mirror += ("?vphone_run=" + $run))' > "$mirror_config"
+          printf '{"version":1,"object":[]}\n' > "$mirror_config"
           echo "SWIFTPM_MIRROR_CONFIG=$mirror_config" >> "$GITHUB_ENV"
 
       - name: Native display and worker regressions
