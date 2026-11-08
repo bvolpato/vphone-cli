@@ -500,7 +500,11 @@ NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
     __block NSDictionary *result = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         [lock lock];
-        if (cancelled) { [lock unlock]; return; }
+        if (cancelled) {
+            [lock unlock];
+            dispatch_semaphore_signal(slot);
+            return;
+        }
         started = YES;
         [lock unlock];
         @autoreleasepool {
@@ -528,7 +532,6 @@ NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
         cancelled = YES;
         BOOL running = started;
         [lock unlock];
-        if (!running) dispatch_semaphore_signal(slot);
         return vpDisplayUnavailable(running ? @"Layout capture exceeded the response deadline; private call may still be running"
                                             : @"Main run loop did not accept the capture before the deadline; queued capture cancelled",
                                     running ? @"timed_out_running" : @"cancelled_before_start");
