@@ -14,9 +14,355 @@
 #import "Include/VphonedNative.h"
 
 #include <IOKit/IOKitLib.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <string.h>
+
+// Private headers describe possible selectors, not the ABI in this guest.
+// Record the runtime encoding before invoking a selector or reading it by KVC.
+static NSMethodSignature *vpDisplaySignature(Class cls, BOOL classMethod, NSString *name,
+                                            const char *returnType, NSArray<NSString *> *arguments,
+                                            NSMutableDictionary *runtime) {
+    SEL selector = NSSelectorFromString(name);
+    Method method = classMethod ? class_getClassMethod(cls, selector) : class_getInstanceMethod(cls, selector);
+    const char *encoding = method ? method_getTypeEncoding(method) : NULL;
+    NSString *identity = [NSString stringWithFormat:@"%c[%s %@]", classMethod ? '+' : '-',
+                          cls ? class_getName(cls) : "unavailable", name];
+    NSMutableDictionary *detail = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"available": @(method != NULL), @"encoding": encoding ? @(encoding) : NSNull.null,
+        @"abi_verified": @NO,
+    }];
+    runtime[@"methods"][identity] = detail;
+    if (!encoding) return nil;
+    NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:encoding];
+    NSMutableArray *types = [NSMutableArray array];
+    for (NSUInteger i = 0; i < signature.numberOfArguments; i++) {
+        [types addObject:@([signature getArgumentTypeAtIndex:i])];
+    }
+    detail[@"return_type"] = @(signature.methodReturnType);
+    detail[@"argument_types"] = types;
+    if (signature.numberOfArguments != arguments.count + 2) return nil;
+    if (strcmp([signature getArgumentTypeAtIndex:0], @encode(id)) != 0
+        || strcmp([signature getArgumentTypeAtIndex:1], @encode(SEL)) != 0) return nil;
+    if (returnType && strcmp(signature.methodReturnType, returnType) != 0) return nil;
+    if (!returnType) {
+        const char *type = signature.methodReturnType;
+        BOOL scalar = type[0] && !type[1] && strchr("cCsSiIlLqQfdB", type[0]) != NULL;
+        if (!scalar && strcmp(type, @encode(id)) != 0 && strcmp(type, @encode(CGRect)) != 0) return nil;
+    }
+    for (NSUInteger i = 0; i < arguments.count; i++) {
+        if (strcmp([signature getArgumentTypeAtIndex:i + 2], arguments[i].UTF8String) != 0) return nil;
+    }
+    detail[@"abi_verified"] = @YES;
+    return signature;
+}
+
+static NSMethodSignature *vpDisplayObjectSignature(id object, NSString *name, const char *returnType,
+                                                  NSArray<NSString *> *arguments,
+                                                  NSMutableDictionary *runtime) {
+    BOOL classMethod = object_isClass(object);
+    Class cls = classMethod ? object : object_getClass(object);
+    return vpDisplaySignature(cls, classMethod, name, returnType, arguments, runtime);
+}
+
+static id vpDisplayObject(id object, NSString *name, NSMutableDictionary *runtime) {
+    if (!object || !vpDisplayObjectSignature(object, name, @encode(id), @[], runtime)) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(object, NSSelectorFromString(name));
+}
+
+static id vpDisplayValue(id object, NSString *key, NSMutableDictionary *runtime) {
+    if (!object) return nil;
+    NSMethodSignature *signature = vpDisplayObjectSignature(object, key, NULL, @[], runtime);
+    if (!signature) return nil;
+    @try {
+        id value = [object valueForKey:key];
+        return value == NSNull.null ? nil : value;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return nil;
+    }
+}
+
+static NSNumber *vpDisplayNumber(id object, NSString *key, NSMutableDictionary *runtime) {
+    id value = vpDisplayValue(object, key, runtime);
+    if (![value isKindOfClass:NSNumber.class]
+        || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()
+        || !isfinite([value doubleValue])) return nil;
+    return value;
+}
+
+static NSString *vpDisplayString(id object, NSString *key, NSUInteger maximumLength, NSMutableDictionary *runtime) {
+    id value = vpDisplayValue(object, key, runtime);
+    if (![value isKindOfClass:NSString.class] || [value length] > maximumLength) return nil;
+    return value;
+}
+
+static NSDictionary *vpDisplayRect(id object, NSString *key, NSMutableDictionary *runtime) {
+    id value = vpDisplayValue(object, key, runtime);
+    if (![value isKindOfClass:NSValue.class] || strcmp([(NSValue *)value objCType], @encode(CGRect)) != 0) return nil;
+    CGRect rect;
+    [(NSValue *)value getValue:&rect size:sizeof(rect)];
+    if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y)
+        || !isfinite(rect.size.width) || !isfinite(rect.size.height)
+        || rect.size.width <= 0 || rect.size.height <= 0) return nil;
+    return @{
+        @"x": @(rect.origin.x), @"y": @(rect.origin.y),
+        @"width": @(rect.size.width), @"height": @(rect.size.height),
+    };
+}
+
+static NSNumber *vpDisplayBoolean(id object, NSString *key, NSMutableDictionary *runtime) {
+    id value = vpDisplayValue(object, key, runtime);
+    return [value isKindOfClass:NSNumber.class] ? @([value boolValue]) : nil;
+}
+
+static NSDictionary *vpDisplayScene(id element, NSMutableDictionary *runtime) {
+    NSMutableDictionary *scene = [NSMutableDictionary dictionary];
+    NSString *bundleID = vpDisplayString(element, @"bundleIdentifier", 255, runtime);
+    NSString *identifier = vpDisplayString(element, @"identifier", 255, runtime);
+    NSDictionary *frame = vpDisplayRect(element, @"frame", runtime);
+    if (bundleID) scene[@"bundle_id"] = bundleID;
+    if (identifier) scene[@"identifier"] = identifier;
+    if (frame) scene[@"frame"] = frame;
+    NSDictionary *referenceFrame = vpDisplayRect(element, @"referenceFrame", runtime);
+    if (referenceFrame) scene[@"reference_frame"] = referenceFrame;
+    NSNumber *focused = vpDisplayBoolean(element, @"hasKeyboardFocus", runtime);
+    if (focused) scene[@"keyboard_focus"] = focused;
+    NSNumber *application = vpDisplayBoolean(element, @"isUIApplicationElement", runtime);
+    if (application) scene[@"application"] = application;
+    NSNumber *role = vpDisplayNumber(element, @"layoutRole", runtime);
+    if (role) scene[@"layout_role"] = role;
+    NSNumber *level = vpDisplayNumber(element, @"level", runtime);
+    if (level) scene[@"level"] = level;
+    return scene;
+}
+
+static NSDictionary *vpDisplayLayoutRow(id monitor, NSString *frontmostBundleID, NSMutableDictionary *runtime) {
+    NSMutableDictionary *row = [NSMutableDictionary dictionary];
+    row[@"monitor_source"] = @"default_main";
+    row[@"geometry_available"] = @NO;
+    id layout = vpDisplayObject(monitor, @"currentLayout", runtime);
+    if (!layout) {
+        row[@"available"] = @NO;
+        row[@"reason"] = @"Monitor or ABI unavailable, or FrontBoard returned no initial layout";
+        return row;
+    }
+    row[@"available"] = @YES;
+    NSDictionary *bounds = vpDisplayRect(layout, @"bounds", runtime);
+    if (bounds) row[@"bounds"] = bounds;
+    NSDictionary *referenceBounds = vpDisplayRect(layout, @"referenceBounds", runtime);
+    if (referenceBounds) row[@"reference_bounds"] = referenceBounds;
+    NSNumber *orientation = vpDisplayNumber(layout, @"interfaceOrientation", runtime);
+    if (orientation) row[@"interface_orientation"] = orientation;
+    BOOL supportedOrientation = orientation && orientation.doubleValue >= 1 && orientation.doubleValue <= 4
+        && orientation.doubleValue == orientation.integerValue;
+    row[@"geometry_available"] = @(bounds != nil && supportedOrientation);
+    NSNumber *layoutDisplayType = vpDisplayNumber(layout, @"displayType", runtime);
+    if (layoutDisplayType) row[@"display_type"] = layoutDisplayType;
+
+    id configuration = vpDisplayValue(layout, @"displayConfiguration", runtime);
+    if (configuration) {
+        NSString *name = vpDisplayString(configuration, @"name", 128, runtime);
+        NSString *deviceName = vpDisplayString(configuration, @"deviceName", 128, runtime);
+        NSNumber *scale = vpDisplayNumber(configuration, @"pointScale", runtime);
+        if (name) row[@"display_name"] = name;
+        if (deviceName) row[@"device_name"] = deviceName;
+        if (scale && isfinite(scale.doubleValue) && scale.doubleValue > 0) row[@"point_scale"] = scale;
+        id identity = vpDisplayValue(configuration, @"identity", runtime);
+        NSNumber *displayID = vpDisplayNumber(identity, @"displayID", runtime);
+        if (!displayID) displayID = vpDisplayNumber(configuration, @"displayID", runtime);
+        if (displayID) row[@"display_id"] = displayID;
+    }
+
+    id elements = vpDisplayValue(layout, @"elements", runtime);
+    if (![elements isKindOfClass:NSArray.class]) {
+        row[@"elements_available"] = @NO;
+        return row;
+    }
+    row[@"elements_available"] = @YES;
+    NSMutableArray *scenes = [NSMutableArray array];
+    if (frontmostBundleID.length) {
+        NSUInteger inspected = 0;
+        for (id element in elements) {
+            if (++inspected > 128) break;
+            NSString *bundleID = vpDisplayString(element, @"bundleIdentifier", 255, runtime);
+            if (![bundleID isEqualToString:frontmostBundleID]) continue;
+            [scenes addObject:vpDisplayScene(element, runtime)];
+            if (scenes.count == 8) break;
+        }
+    }
+    row[@"matched_scene_count"] = @(scenes.count);
+    row[@"foreground_scenes"] = scenes;
+    return row;
+}
+
+static NSMutableDictionary *vpDisplayRuntime(void) {
+    NSMutableDictionary *runtime = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"classes": [NSMutableDictionary dictionary], @"methods": [NSMutableDictionary dictionary],
+    }];
+    for (NSString *name in @[@"CADisplay", @"FBSDisplayLayoutMonitor", @"FBSDisplayLayoutMonitorConfiguration",
+                            @"FBSDisplayLayout", @"FBSDisplayLayoutElement"]) {
+        runtime[@"classes"][name] = @(objc_lookUpClass(name.UTF8String) != Nil);
+    }
+    Class displayClass = objc_lookUpClass("CADisplay");
+    Class monitorClass = objc_lookUpClass("FBSDisplayLayoutMonitor");
+    Class configurationClass = objc_lookUpClass("FBSDisplayLayoutMonitorConfiguration");
+    vpDisplaySignature(displayClass, YES, @"displays", @encode(id), @[], runtime);
+    vpDisplaySignature(monitorClass, YES, @"sharedMonitorForDisplayType:", @encode(id), @[@(@encode(long long))], runtime);
+    vpDisplaySignature(monitorClass, YES, @"monitorWithConfiguration:", @encode(id), @[@(@encode(id))], runtime);
+    vpDisplaySignature(configurationClass, YES, @"configurationForDefaultMainDisplayMonitor", @encode(id), @[], runtime);
+    vpDisplaySignature(monitorClass, NO, @"currentLayout", @encode(id), @[], runtime);
+    vpDisplaySignature(monitorClass, NO, @"invalidate", @encode(void), @[], runtime);
+    for (NSString *key in @[@"bounds", @"referenceBounds", @"interfaceOrientation", @"displayType",
+                           @"displayConfiguration", @"elements"]) {
+        vpDisplaySignature(objc_lookUpClass("FBSDisplayLayout"), NO, key, NULL, @[], runtime);
+    }
+    for (NSString *key in @[@"bundleIdentifier", @"identifier", @"frame", @"referenceFrame",
+                           @"hasKeyboardFocus", @"isUIApplicationElement", @"layoutRole", @"level"]) {
+        vpDisplaySignature(objc_lookUpClass("FBSDisplayLayoutElement"), NO, key, NULL, @[], runtime);
+    }
+    return runtime;
+}
+
+static NSDictionary *vpDisplayUnavailable(NSString *reason, NSString *state) {
+    return @{
+        @"available": @NO, @"geometry_available": @NO, @"reason": reason,
+        @"frontmost_bundle_id": NSNull.null, @"monitors": @[], @"cadisplays": @[],
+        @"runtime": vpDisplayRuntime(),
+        @"thread": @{@"caller_is_main": @(NSThread.isMainThread), @"capture_state": state},
+    };
+}
+
+static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID) {
+    // main.swift runs RunLoop.main in the daemon worker. A scripting session
+    // exits before that startup and must not call these APIs on its main thread.
+    CFStringRef mode = CFRunLoopCopyCurrentMode(CFRunLoopGetMain());
+    BOOL safeThread = NSThread.isMainThread && mode != NULL;
+    if (mode) CFRelease(mode);
+    if (!safeThread) return vpDisplayUnavailable(@"An active main run loop is required", @"unsafe_thread");
+    NSMutableDictionary *runtime = nil;
+    @try {
+        dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY | RTLD_LOCAL);
+        dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_LAZY | RTLD_LOCAL);
+        runtime = vpDisplayRuntime();
+        Class displayClass = objc_lookUpClass("CADisplay");
+        Class monitorClass = objc_lookUpClass("FBSDisplayLayoutMonitor");
+        Class configurationClass = objc_lookUpClass("FBSDisplayLayoutMonitorConfiguration");
+        id displayObjects = vpDisplayObject(displayClass, @"displays", runtime);
+        NSMutableArray *inventory = [NSMutableArray array];
+        if ([displayObjects isKindOfClass:NSArray.class]) {
+            for (id display in displayObjects) {
+                NSMutableDictionary *item = [NSMutableDictionary dictionary];
+                for (NSString *key in @[@"displayId", @"displayType", @"pointScale"]) {
+                    NSNumber *value = vpDisplayNumber(display, key, runtime);
+                    if (value && isfinite(value.doubleValue)) item[key] = value;
+                }
+                for (NSString *key in @[@"name", @"deviceName"]) {
+                    NSString *value = vpDisplayString(display, key, 128, runtime);
+                    if (value) item[key] = value;
+                }
+                [inventory addObject:item];
+                if (inventory.count == 16) break;
+            }
+        }
+        NSMutableArray *rows = [NSMutableArray array];
+        // CADisplay and FrontBoard display-type enum values are not proven
+        // equivalent. Only query the independent default-main monitor.
+        id ownedMonitor = nil;
+        @try {
+            id configuration = vpDisplayObject(configurationClass, @"configurationForDefaultMainDisplayMonitor", runtime);
+            if (configuration
+                && vpDisplaySignature(monitorClass, YES, @"monitorWithConfiguration:", @encode(id), @[@(@encode(id))], runtime)
+                && vpDisplaySignature(monitorClass, NO, @"invalidate", @encode(void), @[], runtime)) {
+                ownedMonitor = ((id (*)(id, SEL, id))objc_msgSend)(monitorClass,
+                    sel_registerName("monitorWithConfiguration:"), configuration);
+            }
+            [rows addObject:vpDisplayLayoutRow(ownedMonitor, frontmostBundleID, runtime)];
+        } @finally {
+            if (ownedMonitor && vpDisplayObjectSignature(ownedMonitor, @"invalidate", @encode(void), @[], runtime)) {
+                ((void (*)(id, SEL))objc_msgSend)(ownedMonitor, sel_registerName("invalidate"));
+            }
+        }
+        BOOL available = NO;
+        BOOL geometryAvailable = NO;
+        for (NSDictionary *row in rows) {
+            available |= [row[@"available"] boolValue];
+            geometryAvailable |= [row[@"geometry_available"] boolValue];
+        }
+        return @{
+            @"available": @(available), @"geometry_available": @(geometryAvailable),
+            @"reason": available ? @"" : @"No current FrontBoard layout was available",
+            @"frontmost_bundle_id": frontmostBundleID ?: NSNull.null,
+            @"runtime": runtime, @"monitors": rows, @"cadisplays": inventory,
+            @"thread": @{@"capture_is_main": @YES, @"main_run_loop_active": @YES, @"capture_state": @"completed"},
+            @"layout_contract": @"Immediate currentLayout only; no callback is installed and an initial nil layout is unavailable",
+            @"display_binding": @"CADisplay inventory is independent; display type does not uniquely identify a panel",
+            @"shared_monitor_query": @"Not invoked; FrontBoard display-type enum semantics are unverified",
+        };
+    } @catch (NSException *exception) {
+        return @{
+            @"available": @NO, @"geometry_available": @NO,
+            @"reason": exception.reason ?: @"FrontBoard layout query failed",
+            @"frontmost_bundle_id": NSNull.null, @"monitors": @[], @"cadisplays": @[],
+            @"runtime": runtime ?: vpDisplayRuntime(),
+            @"thread": @{@"capture_is_main": @YES, @"capture_state": @"exception"},
+        };
+    }
+}
+
+NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
+    static dispatch_semaphore_t slot;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ slot = dispatch_semaphore_create(1); });
+    if (dispatch_semaphore_wait(slot, DISPATCH_TIME_NOW) != 0) {
+        return vpDisplayUnavailable(@"Another layout capture is pending or running", @"busy");
+    }
+    if (NSThread.isMainThread) {
+        @try { return vpDisplayCapture(frontmostBundleID); }
+        @finally { dispatch_semaphore_signal(slot); }
+    }
+    NSLock *lock = [NSLock new];
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block BOOL started = NO;
+    __block BOOL cancelled = NO;
+    __block NSDictionary *result = nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [lock lock];
+        if (cancelled) { [lock unlock]; return; }
+        started = YES;
+        [lock unlock];
+        @autoreleasepool {
+            NSDictionary *capture = vpDisplayCapture(frontmostBundleID);
+            [lock lock];
+            result = capture;
+            [lock unlock];
+        }
+        dispatch_semaphore_signal(done);
+        dispatch_semaphore_signal(slot);
+    });
+    // Only this background queue/completion wait is bounded. It cannot bound
+    // the caller's foreground reads or a direct main-thread call. Once a
+    // private call starts it cannot be forcibly cancelled; keep the slot
+    // occupied until that capture finishes.
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC)) != 0) {
+        [lock lock];
+        cancelled = YES;
+        BOOL running = started;
+        [lock unlock];
+        if (!running) dispatch_semaphore_signal(slot);
+        return vpDisplayUnavailable(running ? @"Layout capture exceeded the response deadline; private call may still be running"
+                                            : @"Main run loop did not accept the capture before the deadline; queued capture cancelled",
+                                    running ? @"timed_out_running" : @"cancelled_before_start");
+    }
+    [lock lock];
+    NSDictionary *capture = result;
+    [lock unlock];
+    return capture;
+}
 
 static NSDictionary *vpModeDescription(id mode) {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];

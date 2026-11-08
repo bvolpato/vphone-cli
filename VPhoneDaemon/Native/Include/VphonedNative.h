@@ -231,6 +231,11 @@ void vp_hinge_reading_publish(double angleDegrees, int hingeState);
 NSArray * _Nonnull vp_display_probe(void);
 /// Read-only CoreAnimation display modes and capability surface.
 NSDictionary<NSString *, id> * _Nonnull vp_display_modes(void);
+/// Read-only FrontBoard layouts on the active main run loop. Only the background
+/// queue/completion wait is bounded; a private call already running cannot be
+/// cancelled. The caller must reverify the foreground bundle before exposing
+/// the filtered scenes. This does not establish an atomic scene/process epoch.
+NSDictionary<NSString *, id> * _Nonnull vp_display_layout(NSString * _Nullable frontmostBundleID);
 NSDictionary<NSString *, id> * _Nonnull vp_device_pose_get(void);
 /// Set the hinge to `angleDegrees` at once. `orientation` is CoreMotion's
 /// device orientation for the host controls (1 portrait … 6 face down), or 0
