@@ -2,12 +2,19 @@ name: package
 
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        description: Build the full release or only the signed iOS worker
+        type: choice
+        options: [bundle, worker]
+        default: bundle
 
 permissions:
   contents: read
 
 jobs:
   package:
+    if: inputs.component != 'worker'
     runs-on: xcode-27
     steps:
       - name: Checkout
@@ -70,3 +77,7 @@ jobs:
             vphone-build.log
             launchpad-build.log
           if-no-files-found: ignore
+
+  worker:
+    if: inputs.component == 'worker'
+    uses: ./.github/workflows/guest-worker.yml

@@ -1,0 +1,76 @@
+name: Guest worker
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      SWIFT_JOBS: "4"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check native toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = 27.1
+
+      - name: Build iOS worker
+        run: |
+          set -euo pipefail
+          xcodebuild -project VPhoneDaemon/VPhoneDaemon.xcodeproj \
+            -scheme vphoned -configuration Release -sdk iphoneos \
+            -derivedDataPath .build/GuestWorker -jobs 4 \
+            CODE_SIGNING_ALLOWED=NO SUPPORTS_MACCATALYST=NO \
+            EFFECTIVE_PLATFORM_NAME=-iphoneos build 2>&1 | tee guest-worker-build.log
+
+      - name: Sign and verify iOS worker
+        run: |
+          set -euo pipefail
+          mkdir -p guest-worker
+          cp .build/GuestWorker/Build/Products/Release-iphoneos/vphoned guest-worker/vphoned
+          worker=guest-worker/vphoned
+          nm -u "$worker" > guest-worker/undefined-symbols.txt
+          if grep -q '_swift_initBorrow' guest-worker/undefined-symbols.txt; then
+            echo 'error: worker requires a Swift runtime symbol unavailable on iOS 26' >&2
+            exit 1
+          fi
+          test "$(lipo -archs "$worker")" = arm64
+          install_name_tool -add_rpath /usr/lib/vphone "$worker"
+          codesign --force --sign - \
+            --entitlements VPhoneDaemon/Configuration/VPhoneDaemon.entitlements "$worker"
+          codesign --verify --strict "$worker"
+          codesign -d --entitlements - --xml "$worker" > guest-worker/entitlements.plist
+          plutil -lint guest-worker/entitlements.plist
+          diff -u \
+            <(plutil -convert json -o - VPhoneDaemon/Configuration/VPhoneDaemon.entitlements | jq -S .) \
+            <(plutil -convert json -o - guest-worker/entitlements.plist | jq -S .)
+          digest=$(shasum -a 256 "$worker" | awk '{print $1}')
+          jq -n --arg source "$GITHUB_SHA" --arg sha256 "$digest" \
+            --arg run "$GITHUB_RUN_ID" --arg sdk "$(xcrun --sdk iphoneos --show-sdk-version)" \
+            '{source_revision:$source,sha256:$sha256,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"iOS worker only"}' \
+            > guest-worker/manifest.json
+
+      - name: Upload signed worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: vphoned-${{ github.sha }}
+          path: guest-worker/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-worker-logs-${{ github.sha }}
+          path: guest-worker-build.log
+          if-no-files-found: ignore
