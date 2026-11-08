@@ -16,6 +16,7 @@ jobs:
   package:
     if: inputs.component != 'worker'
     runs-on: xcode-27
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     steps:
@@ -54,6 +55,18 @@ jobs:
           zsh VPhoneDaemon/Tests/run-cached-binary-identity-tests.sh
           sh VPhoneDaemon/Tests/run-health-tests.sh
 
+      - name: DriverKit and patch catalogue regressions
+        run: |
+          set -o pipefail
+          xcodebuild -workspace VPhone.xcworkspace \
+            -scheme FirmwarePatcherTests -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/XcodeFirmwareTests -jobs 4 \
+            -only-testing:FirmwarePatcherTests/CustomFirmwareDriverKitTests \
+            -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
+            -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
+            2>&1 | tee firmware-tests.log
+
       - name: Build VPhone.bundle
         env:
           SWIFT_JOBS: "4"
@@ -86,18 +99,6 @@ jobs:
           done
           ditto -c -k --keepParent "$bundle" "VPhone-${GITHUB_SHA}.zip"
 
-      - name: DriverKit and patch catalogue regressions
-        run: |
-          set -o pipefail
-          xcodebuild -project VPhoneExecutable/VPhoneCommand/VPhoneCommand.xcodeproj \
-            -scheme FirmwarePatcherTests -configuration Debug \
-            -destination 'platform=macOS,arch=arm64' \
-            -derivedDataPath .build/XcodeFirmwareTests -jobs 4 \
-            -only-testing:FirmwarePatcherTests/CustomFirmwareDriverKitTests \
-            -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
-            -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
-            2>&1 | tee firmware-tests.log
-
       - name: Build vphone-launchpad.app
         run: |
           set -o pipefail
@@ -106,6 +107,13 @@ jobs:
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath .build/XcodeLaunchpad build \
             2>&1 | tee launchpad-build.log
+
+      - name: Package Linux guest resources
+        run: |
+          set -euo pipefail
+          zsh VPhoneExecutable/VPhoneVirtualization/Build/PackageLinuxResources.sh \
+            .build/XcodeBundle/Build/Products/Release/VPhone.bundle \
+            "vphone-linux-resources-${GITHUB_SHA}.zip"
 
       - name: Package unsigned vphone-launchpad.app
         run: |
@@ -122,8 +130,9 @@ jobs:
             --arg bundle_sha256 "$(shasum -a 256 "VPhone-${GITHUB_SHA}.zip" | awk '{print $1}')" \
             --arg launchpad_sha256 "$(shasum -a 256 "vphone-launchpad-${GITHUB_SHA}.zip" | awk '{print $1}')" \
             --arg worker_sha256 "$(shasum -a 256 "$bundle/Contents/Resources/guest-resources/vphoned" | awk '{print $1}')" \
+            --arg linux_resources_sha256 "$(shasum -a 256 "vphone-linux-resources-${GITHUB_SHA}.zip" | awk '{print $1}')" \
             --slurpfile daemon_pins VPhoneDaemon/VPhoneDaemon.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved \
-            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle and separate unsigned launchpad",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins}' \
+            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle, separate unsigned launchpad and Linux guest resources",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,linux_resources_sha256:$linux_resources_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins}' \
             > bundle-manifest.json
 
       - name: Upload Release packages
@@ -133,6 +142,8 @@ jobs:
           path: |
             VPhone-${{ github.sha }}.zip
             vphone-launchpad-${{ github.sha }}.zip
+            vphone-linux-resources-${{ github.sha }}.zip
+            vphone-linux-resources-${{ github.sha }}.json
             bundle-manifest.json
           if-no-files-found: error
           retention-days: 7
