@@ -117,6 +117,7 @@ enum GuestAPI {
                 "device_info",
                 "display",
                 "display_layout",
+                "display_capture_active",
                 "display_orientation",
                 "display_auto_lock",
                 "device_pose",
@@ -187,6 +188,8 @@ enum GuestAPI {
             return try activeScreenInfo()
         case "screen.screenshot":
             return try takeScreenshot(base64: true, nativeResolution: true)
+        case "display.capture_active":
+            return vp_display_capture_active()
         case "apps.list":
             let filter = params["filter"] as? String ?? "all"
             let apps = try listedApps()

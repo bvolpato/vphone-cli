@@ -237,6 +237,10 @@ NSDictionary<NSString *, id> * _Nonnull vp_display_modes(void);
 /// caller must reverify the foreground bundle before exposing filtered scenes.
 /// This does not establish an atomic scene/process epoch.
 NSDictionary<NSString *, id> * _Nonnull vp_display_layout(NSString * _Nullable frontmostBundleID);
+/// Read-only raw native-raster probe for the active display. A single admitted
+/// background task owns render resources through completion, even after the
+/// bounded caller wait expires. No resize or orientation mapping is applied.
+NSDictionary<NSString *, id> * _Nonnull vp_display_capture_active(void);
 NSDictionary<NSString *, id> * _Nonnull vp_device_pose_get(void);
 /// Set the hinge to `angleDegrees` at once. `orientation` is CoreMotion's
 /// device orientation for the host controls (1 portrait … 6 face down), or 0
