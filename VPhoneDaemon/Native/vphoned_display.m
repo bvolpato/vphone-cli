@@ -75,6 +75,76 @@ static id vpDisplayObject(id object, NSString *name, NSMutableDictionary *runtim
     return ((id (*)(id, SEL))objc_msgSend)(object, NSSelectorFromString(name));
 }
 
+static NSMethodSignature *vpDisplayBlockGetterSignature(Class cls, NSString *name, NSMutableDictionary *runtime) {
+    NSMethodSignature *signature = vpDisplaySignature(cls, NO, name, "@?", @[], runtime);
+    return signature ?: vpDisplaySignature(cls, NO, name, @encode(id), @[], runtime);
+}
+
+typedef struct {
+    bool (*hasSignature)(void *);
+    const char *(*signature)(void *);
+    Class blockClass;
+} VPDisplayBlockAPI;
+
+static VPDisplayBlockAPI vpDisplayBlockAPI(void) {
+    static VPDisplayBlockAPI api;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Apple libclosure owns descriptor formats and pointer authentication.
+        api.hasSignature = (bool (*)(void *))dlsym(RTLD_DEFAULT, "_Block_has_signature");
+        api.signature = (const char *(*)(void *))dlsym(RTLD_DEFAULT, "_Block_signature");
+        api.blockClass = objc_lookUpClass("NSBlock");
+    });
+    return api;
+}
+
+static NSDictionary *vpDisplayBlockAPIMetadata(void) {
+    VPDisplayBlockAPI api = vpDisplayBlockAPI();
+    return @{
+        @"has_signature_api": @(api.hasSignature != NULL),
+        @"signature_api": @(api.signature != NULL), @"nsblock_class": @(api.blockClass != Nil),
+        @"lookup": @"once_per_process",
+    };
+}
+
+static NSDictionary *vpDisplayBlockMetadata(id object, NSString *getter, NSMutableDictionary *runtime) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"signature_available": @NO, @"state": @"getter_unavailable_or_abi_mismatch",
+    }];
+    if (!object) { result[@"state"] = @"object_unavailable"; return result; }
+    NSMethodSignature *getterSignature = vpDisplayBlockGetterSignature(object_getClass(object), getter, runtime);
+    if (!getterSignature) return result;
+    result[@"getter_return_type"] = @(getterSignature.methodReturnType);
+    @try {
+        id value = ((id (*)(id, SEL))objc_msgSend)(object, NSSelectorFromString(getter));
+        if (!value) { result[@"state"] = @"nil"; return result; }
+        VPDisplayBlockAPI api = vpDisplayBlockAPI();
+        BOOL isBlock = NO;
+        for (Class cls = object_getClass(value); cls; cls = class_getSuperclass(cls)) {
+            if (api.blockClass && cls == api.blockClass) { isBlock = YES; break; }
+        }
+        result[@"is_nsblock"] = @(isBlock);
+        if (!isBlock) { result[@"state"] = @"not_verified_nsblock"; return result; }
+        if (!api.hasSignature || !api.signature) { result[@"state"] = @"descriptor_api_unavailable"; return result; }
+        bool hasSignature = api.hasSignature((__bridge void *)value);
+        result[@"has_signature"] = @(hasSignature);
+        if (!hasSignature) { result[@"state"] = @"no_compiler_signature"; return result; }
+        const char *encoding = api.signature((__bridge void *)value);
+        if (!encoding) { result[@"state"] = @"signature_unavailable"; return result; }
+        size_t length = strnlen(encoding, 1025);
+        if (!length || length > 1024) { result[@"state"] = @"signature_length_unsupported"; return result; }
+        NSString *signature = [[NSString alloc] initWithBytes:encoding length:length encoding:NSUTF8StringEncoding];
+        if (!signature) { result[@"state"] = @"signature_invalid_utf8"; return result; }
+        result[@"state"] = @"compiler_signature";
+        result[@"signature_available"] = @YES;
+        result[@"encoding"] = signature;
+    } @catch (NSException *exception) {
+        result[@"state"] = @"getter_exception";
+        result[@"reason"] = exception.reason ?: exception.name;
+    }
+    return result;
+}
+
 static id vpDisplayValue(id object, NSString *key, NSMutableDictionary *runtime) {
     if (!object) return nil;
     NSMethodSignature *signature = vpDisplayObjectSignature(object, key, NULL, @[], runtime);
@@ -216,6 +286,9 @@ static NSMutableDictionary *vpDisplayRuntime(void) {
     vpDisplaySignature(monitorClass, YES, @"sharedMonitorForDisplayType:", @encode(id), @[@(@encode(long long))], runtime);
     vpDisplaySignature(monitorClass, YES, @"monitorWithConfiguration:", @encode(id), @[@(@encode(id))], runtime);
     vpDisplaySignature(configurationClass, YES, @"configurationForDefaultMainDisplayMonitor", @encode(id), @[], runtime);
+    vpDisplayBlockGetterSignature(configurationClass, @"transitionHandler", runtime);
+    vpDisplayBlockGetterSignature(monitorClass, @"handler", runtime);
+    runtime[@"block_signature_api"] = vpDisplayBlockAPIMetadata();
     vpDisplaySignature(monitorClass, NO, @"currentLayout", @encode(id), @[], runtime);
     vpDisplaySignature(monitorClass, NO, @"invalidate", @encode(void), @[], runtime);
     for (NSString *key in @[@"bounds", @"referenceBounds", @"interfaceOrientation", @"displayType",
@@ -276,6 +349,15 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID, NSMutableDict
             // CADisplay and FrontBoard display-type enum values are not proven
             // equivalent. Only query the independent default-main monitor.
             id configuration = vpDisplayObject(configurationClass, @"configurationForDefaultMainDisplayMonitor", runtime);
+            capture[@"callback_metadata"] = @{
+                @"factory_configuration_transition_handler": vpDisplayBlockMetadata(configuration, @"transitionHandler", runtime),
+                @"monitor_handler": @{
+                    @"state": @"not_read", @"reason": @"Deprecated getter requires a mutable monitor; this monitor is factory-configured",
+                },
+                @"monitor_configuration": @{
+                    @"state": @"unavailable", @"reason": @"No source-verified configuration accessor; private ivars are not read",
+                },
+            };
             if (configuration
                 && vpDisplaySignature(monitorClass, YES, @"monitorWithConfiguration:", @encode(id), @[@(@encode(id))], runtime)
                 && vpDisplaySignature(monitorClass, NO, @"invalidate", @encode(void), @[], runtime)) {
@@ -296,6 +378,7 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID, NSMutableDict
             @"reason": available ? @"" : @"No current FrontBoard layout was available",
             @"frontmost_bundle_id": frontmostBundleID ?: NSNull.null,
             @"runtime": runtime, @"monitors": rows, @"cadisplays": capture[@"cadisplays"] ?: @[],
+            @"callback_metadata": capture[@"callback_metadata"] ?: @{},
             @"thread": @{@"capture_is_main": @YES, @"main_run_loop_active": @YES, @"capture_state": @"completed"},
             @"layout_contract": @"One owned monitor sampled asynchronously for initial currentLayout; no private callback ABI is assumed",
             @"display_binding": @"CADisplay inventory is independent; display type does not uniquely identify a panel",
