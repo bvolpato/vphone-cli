@@ -1,4 +1,4 @@
-name: Cached worker validation
+name: Cached worker identity validation
 
 on:
   workflow_dispatch:
@@ -16,5 +16,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check native file identity and confirmation
         run: VPhoneDaemon/Tests/run-cached-binary-identity-tests.sh
-      - name: Check Swift logic and marker publication
+      - name: Check existing Swift logic
         run: VPhoneDaemon/Tests/run-logic-tests.sh
