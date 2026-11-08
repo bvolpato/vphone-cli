@@ -186,6 +186,7 @@ static NSDictionary *vpDisplayRect(id object, NSString *key, NSMutableDictionary
     [(NSValue *)value getValue:&rect size:sizeof(rect)];
     if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y)
         || !isfinite(rect.size.width) || !isfinite(rect.size.height)
+        || !isfinite(CGRectGetMaxX(rect)) || !isfinite(CGRectGetMaxY(rect))
         || rect.size.width <= 0 || rect.size.height <= 0) return nil;
     return @{
         @"x": @(rect.origin.x), @"y": @(rect.origin.y),
@@ -238,7 +239,6 @@ static NSDictionary *vpDisplayLayoutRow(id monitor, NSString *frontmostBundleID,
     if (orientation) row[@"interface_orientation"] = orientation;
     BOOL supportedOrientation = orientation && orientation.doubleValue >= 1 && orientation.doubleValue <= 4
         && orientation.doubleValue == orientation.integerValue;
-    row[@"geometry_available"] = @(bounds != nil && supportedOrientation);
     NSNumber *layoutDisplayType = vpDisplayNumber(layout, @"displayType", runtime);
     if (layoutDisplayType) row[@"display_type"] = layoutDisplayType;
 
@@ -257,6 +257,11 @@ static NSDictionary *vpDisplayLayoutRow(id monitor, NSString *frontmostBundleID,
         if (!displayID) displayID = vpDisplayNumber(configuration, @"displayID", runtime);
         if (displayID) row[@"display_id"] = displayID;
     }
+    NSNumber *scale = row[@"point_scale"], *displayID = row[@"display_id"];
+    BOOL validID = displayID && displayID.doubleValue > 0 && displayID.doubleValue <= UINT32_MAX
+        && floor(displayID.doubleValue) == displayID.doubleValue;
+    row[@"geometry_available"] = @(bounds && referenceBounds && scale.doubleValue > 0 && validID && supportedOrientation);
+    if (![row[@"geometry_available"] boolValue]) row[@"reason"] = @"Active display geometry is incomplete or unsupported";
 
     id elements = vpDisplayValue(layout, @"elements", runtime);
     if (![elements isKindOfClass:NSArray.class]) {
@@ -424,8 +429,16 @@ static void vpDisplayFinish(NSMutableDictionary *capture, NSMutableDictionary *r
                            void (^completion)(NSDictionary *)) {
     id ownedMonitor = capture[@"owned_monitor"];
     @try {
-        if (ownedMonitor && vpDisplayObjectSignature(ownedMonitor, @"invalidate", @encode(void), @[], capture[@"runtime"])) {
-            ((void (*)(id, SEL))objc_msgSend)(ownedMonitor, sel_registerName("invalidate"));
+        if (ownedMonitor) {
+            if (!vpDisplayObjectSignature(ownedMonitor, @"invalidate", @encode(void), @[], capture[@"runtime"])) {
+                report[@"available"] = @NO;
+                report[@"geometry_available"] = @NO;
+                report[@"frontmost_bundle_id"] = NSNull.null;
+                report[@"monitors"] = @[];
+                report[@"reason"] = @"Owned monitor cleanup ABI is unavailable";
+            } else {
+                ((void (*)(id, SEL))objc_msgSend)(ownedMonitor, sel_registerName("invalidate"));
+            }
         }
     } @catch (NSException *exception) {
         report[@"available"] = @NO;

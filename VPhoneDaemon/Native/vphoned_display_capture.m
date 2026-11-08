@@ -48,9 +48,11 @@ static NSDictionary *vpCaptureSource(NSDictionary *layout, NSString **reason) {
         return nil;
     }
     NSArray *monitors = layout[@"monitors"], *displays = layout[@"cadisplays"];
+    // Discovery stops at 16 rows. At that boundary an unseen duplicate can
+    // prevent a unique binding, even when the returned rows look distinct.
     if (![monitors isKindOfClass:NSArray.class] || monitors.count != 1
-        || ![displays isKindOfClass:NSArray.class] || displays.count == 0 || displays.count > 16) {
-        *reason = @"The active layout or display inventory is absent or ambiguous";
+        || ![displays isKindOfClass:NSArray.class] || displays.count == 0 || displays.count >= 16) {
+        *reason = @"The active layout or display inventory is absent, ambiguous or at its discovery limit";
         return nil;
     }
     NSDictionary *monitor = monitors.firstObject;
@@ -210,9 +212,11 @@ static NSDictionary *vpCaptureRender(NSDictionary *source, BOOL (^cancelled)(voi
             return vpCaptureUnavailable(@"PNG encoding failed or exceeded the capture output limit", @"encoding_failed");
         }
         if (cancelled()) return vpCaptureUnavailable(@"Capture exceeded its deadline during encoding", @"cancelled");
+        NSString *encoded = [png base64EncodedStringWithOptions:0];
         return @{
-            @"available": @YES, @"format": @"png", @"base64": [png base64EncodedStringWithOptions:0],
-            @"width": @(width), @"height": @(height), @"row_bytes": @(stride), @"surface_bytes": @(bytes),
+            @"available": @YES, @"format": @"png", @"base64": encoded,
+            @"width": @(width), @"height": @((NSUInteger)height),
+            @"row_bytes": @((NSUInteger)stride), @"surface_bytes": @((NSUInteger)bytes),
             @"pixel_format": @"BGRA8", @"png_bitmap": @"premultiplied_first_32_little", @"color_space": @"DeviceRGB",
             @"rotation_applied": @0, @"resized": @NO, @"orientation_mapping_verified": @NO,
             @"color_profile_verified": @NO, @"capture_content_verified": @NO,
