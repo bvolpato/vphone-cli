@@ -172,11 +172,22 @@ static NSString *vpDisplayString(id object, NSString *key, NSUInteger maximumLen
     return value;
 }
 
-static NSString *vpDisplayUUID(id object, NSString *key, NSMutableDictionary *runtime) {
-    id value = vpDisplayValue(object, key, runtime);
-    if ([value isKindOfClass:NSUUID.class]) return [(NSUUID *)value UUIDString];
-    if (![value isKindOfClass:NSString.class] || [value length] > 128) return nil;
-    return [[NSUUID alloc] initWithUUIDString:value].UUIDString;
+// Only a verified getter returning nil establishes absence. Keep unreadable or
+// malformed UUIDs explicit so capture cannot mistake them for UUID-less panels.
+static id vpDisplayUUID(id object, NSString *key, NSMutableDictionary *runtime) {
+    if (!object || !vpDisplayObjectSignature(object, key, @encode(id), @[], runtime)) return NSNull.null;
+    @try {
+        id value = ((id (*)(id, SEL))objc_msgSend)(object, NSSelectorFromString(key));
+        if (!value) return nil;
+        if ([value isKindOfClass:NSUUID.class]) return [(NSUUID *)value UUIDString];
+        if ([value isKindOfClass:NSString.class] && [value length] <= 128) {
+            NSString *uuid = [[NSUUID alloc] initWithUUIDString:value].UUIDString;
+            if (uuid) return uuid;
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+    }
+    return NSNull.null;
 }
 
 static NSDictionary *vpDisplayRect(id object, NSString *key, NSMutableDictionary *runtime) {
@@ -249,7 +260,7 @@ static NSDictionary *vpDisplayLayoutRow(id monitor, NSString *frontmostBundleID,
         NSNumber *scale = vpDisplayNumber(configuration, @"pointScale", runtime);
         if (name) row[@"display_name"] = name;
         if (deviceName) row[@"device_name"] = deviceName;
-        NSString *hardwareIdentifier = vpDisplayUUID(configuration, @"hardwareIdentifier", runtime);
+        id hardwareIdentifier = vpDisplayUUID(configuration, @"hardwareIdentifier", runtime);
         if (hardwareIdentifier) row[@"hardware_identifier"] = hardwareIdentifier;
         if (scale && isfinite(scale.doubleValue) && scale.doubleValue > 0) row[@"point_scale"] = scale;
         id identity = vpDisplayValue(configuration, @"identity", runtime);
@@ -362,7 +373,7 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID, NSMutableDict
                     }
                     NSDictionary *bounds = vpDisplayRect(display, @"bounds", runtime);
                     if (bounds) item[@"bounds"] = bounds;
-                    NSString *uniqueID = vpDisplayUUID(display, @"uniqueId", runtime);
+                    id uniqueID = vpDisplayUUID(display, @"uniqueId", runtime);
                     if (uniqueID) item[@"uniqueId"] = uniqueID;
                     [inventory addObject:item];
                     if (inventory.count == 16) break;

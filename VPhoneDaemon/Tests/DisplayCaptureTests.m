@@ -249,6 +249,10 @@ static void captureChecks(void) {
     require([report[@"available"] boolValue]
             && [report[@"identity_binding"] isEqual:@"matching_nonzero_hardware_uuid_display_id_and_scale_with_unique_render_name"],
             "matching hardware UUIDs must retain the existing capture binding");
+    require([report[@"identity_binding"] isKindOfClass:NSString.class]
+            && [report[@"source"][@"hardware_identifier"] isKindOfClass:NSString.class]
+            && [report[@"source"][@"hardware_identifier"] isEqual:report[@"source_after"][@"hardware_identifier"]],
+            "UUID capture must preserve a string binding and UUID presence in both samples");
     NSMutableDictionary *before = coverLayout();
     captureLayouts = @[before, before];
     captureLayoutIndex = 0;
@@ -258,6 +262,9 @@ static void captureChecks(void) {
     require([report[@"source"] isEqual:report[@"source_after"]], "both capture samples must retain the same binding");
     require([report[@"identity_binding"] isEqual:@"matching_display_id_render_name_scale_and_reference_bounds_without_hardware_uuid"],
             "UUID-less capture must report its actual binding evidence");
+    require([report[@"identity_binding"] isKindOfClass:NSString.class]
+            && report[@"source"][@"hardware_identifier"] == nil && report[@"source_after"][@"hardware_identifier"] == nil,
+            "UUID-less capture must preserve a string binding and genuine absence in both samples");
     require([report[@"rotation_applied"] isEqual:@0] && [report[@"resized"] isEqual:@NO]
             && [report[@"orientation_mapping_verified"] isEqual:@NO] && [report[@"capture_content_verified"] isEqual:@NO],
             "raw capture cannot claim orientation or content verification");
@@ -277,6 +284,15 @@ static void captureChecks(void) {
     captureLayoutIndex = 0;
     require([vpCapturePerform(^BOOL { return NO; })[@"state"] isEqual:@"source_changed"],
             "two individually valid bindings cannot change across a capture");
+    changed = coverLayout();
+    changed[@"monitors"][0][@"hardware_identifier"] = @"51E247B8-F389-4F84-BE57-FE54747ED152";
+    changed[@"cadisplays"][0][@"uniqueId"] = @"51E247B8-F389-4F84-BE57-FE54747ED152";
+    for (NSArray *samples in @[@[before, changed], @[changed, before]]) {
+        captureLayouts = samples;
+        captureLayoutIndex = 0;
+        require([vpCapturePerform(^BOOL { return NO; })[@"state"] isEqual:@"source_changed"],
+                "UUID presence cannot change between two otherwise valid capture samples");
+    }
     captureLayouts = nil;
 }
 
