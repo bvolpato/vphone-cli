@@ -21,6 +21,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <string.h>
+#include <time.h>
 
 // Private headers describe possible selectors, not the ABI in this guest.
 // Record the runtime encoding before invoking a selector or reading it by KVC.
@@ -237,56 +238,53 @@ static NSDictionary *vpDisplayUnavailable(NSString *reason, NSString *state) {
     };
 }
 
-static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID) {
+static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID, NSMutableDictionary *capture) {
     // main.swift runs RunLoop.main in the daemon worker. A scripting session
     // exits before that startup and must not call these APIs on its main thread.
     CFStringRef mode = CFRunLoopCopyCurrentMode(CFRunLoopGetMain());
     BOOL safeThread = NSThread.isMainThread && mode != NULL;
     if (mode) CFRelease(mode);
     if (!safeThread) return vpDisplayUnavailable(@"An active main run loop is required", @"unsafe_thread");
-    NSMutableDictionary *runtime = nil;
+    NSMutableDictionary *runtime = capture[@"runtime"];
     @try {
-        dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY | RTLD_LOCAL);
-        dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_LAZY | RTLD_LOCAL);
-        runtime = vpDisplayRuntime();
-        Class displayClass = objc_lookUpClass("CADisplay");
-        Class monitorClass = objc_lookUpClass("FBSDisplayLayoutMonitor");
-        Class configurationClass = objc_lookUpClass("FBSDisplayLayoutMonitorConfiguration");
-        id displayObjects = vpDisplayObject(displayClass, @"displays", runtime);
-        NSMutableArray *inventory = [NSMutableArray array];
-        if ([displayObjects isKindOfClass:NSArray.class]) {
-            for (id display in displayObjects) {
-                NSMutableDictionary *item = [NSMutableDictionary dictionary];
-                for (NSString *key in @[@"displayId", @"displayType", @"pointScale"]) {
-                    NSNumber *value = vpDisplayNumber(display, key, runtime);
-                    if (value && isfinite(value.doubleValue)) item[key] = value;
+        if (!runtime) {
+            dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY | RTLD_LOCAL);
+            dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_LAZY | RTLD_LOCAL);
+            runtime = vpDisplayRuntime();
+            capture[@"runtime"] = runtime;
+            Class displayClass = objc_lookUpClass("CADisplay");
+            Class monitorClass = objc_lookUpClass("FBSDisplayLayoutMonitor");
+            Class configurationClass = objc_lookUpClass("FBSDisplayLayoutMonitorConfiguration");
+            id displayObjects = vpDisplayObject(displayClass, @"displays", runtime);
+            NSMutableArray *inventory = [NSMutableArray array];
+            if ([displayObjects isKindOfClass:NSArray.class]) {
+                for (id display in displayObjects) {
+                    NSMutableDictionary *item = [NSMutableDictionary dictionary];
+                    for (NSString *key in @[@"displayId", @"displayType", @"pointScale"]) {
+                        NSNumber *value = vpDisplayNumber(display, key, runtime);
+                        if (value && isfinite(value.doubleValue)) item[key] = value;
+                    }
+                    for (NSString *key in @[@"name", @"deviceName"]) {
+                        NSString *value = vpDisplayString(display, key, 128, runtime);
+                        if (value) item[key] = value;
+                    }
+                    [inventory addObject:item];
+                    if (inventory.count == 16) break;
                 }
-                for (NSString *key in @[@"name", @"deviceName"]) {
-                    NSString *value = vpDisplayString(display, key, 128, runtime);
-                    if (value) item[key] = value;
-                }
-                [inventory addObject:item];
-                if (inventory.count == 16) break;
             }
-        }
-        NSMutableArray *rows = [NSMutableArray array];
-        // CADisplay and FrontBoard display-type enum values are not proven
-        // equivalent. Only query the independent default-main monitor.
-        id ownedMonitor = nil;
-        @try {
+            capture[@"cadisplays"] = inventory;
+            // CADisplay and FrontBoard display-type enum values are not proven
+            // equivalent. Only query the independent default-main monitor.
             id configuration = vpDisplayObject(configurationClass, @"configurationForDefaultMainDisplayMonitor", runtime);
             if (configuration
                 && vpDisplaySignature(monitorClass, YES, @"monitorWithConfiguration:", @encode(id), @[@(@encode(id))], runtime)
                 && vpDisplaySignature(monitorClass, NO, @"invalidate", @encode(void), @[], runtime)) {
-                ownedMonitor = ((id (*)(id, SEL, id))objc_msgSend)(monitorClass,
+                id ownedMonitor = ((id (*)(id, SEL, id))objc_msgSend)(monitorClass,
                     sel_registerName("monitorWithConfiguration:"), configuration);
-            }
-            [rows addObject:vpDisplayLayoutRow(ownedMonitor, frontmostBundleID, runtime)];
-        } @finally {
-            if (ownedMonitor && vpDisplayObjectSignature(ownedMonitor, @"invalidate", @encode(void), @[], runtime)) {
-                ((void (*)(id, SEL))objc_msgSend)(ownedMonitor, sel_registerName("invalidate"));
+                if (ownedMonitor) capture[@"owned_monitor"] = ownedMonitor;
             }
         }
+        NSArray *rows = @[vpDisplayLayoutRow(capture[@"owned_monitor"], frontmostBundleID, runtime)];
         BOOL available = NO;
         BOOL geometryAvailable = NO;
         for (NSDictionary *row in rows) {
@@ -297,13 +295,14 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID) {
             @"available": @(available), @"geometry_available": @(geometryAvailable),
             @"reason": available ? @"" : @"No current FrontBoard layout was available",
             @"frontmost_bundle_id": frontmostBundleID ?: NSNull.null,
-            @"runtime": runtime, @"monitors": rows, @"cadisplays": inventory,
+            @"runtime": runtime, @"monitors": rows, @"cadisplays": capture[@"cadisplays"] ?: @[],
             @"thread": @{@"capture_is_main": @YES, @"main_run_loop_active": @YES, @"capture_state": @"completed"},
-            @"layout_contract": @"Immediate currentLayout only; no callback is installed and an initial nil layout is unavailable",
+            @"layout_contract": @"One owned monitor sampled asynchronously for initial currentLayout; no private callback ABI is assumed",
             @"display_binding": @"CADisplay inventory is independent; display type does not uniquely identify a panel",
             @"shared_monitor_query": @"Not invoked; FrontBoard display-type enum semantics are unverified",
         };
     } @catch (NSException *exception) {
+        capture[@"failed"] = @YES;
         return @{
             @"available": @NO, @"geometry_available": @NO,
             @"reason": exception.reason ?: @"FrontBoard layout query failed",
@@ -314,16 +313,80 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID) {
     }
 }
 
+static double vpDisplayMonotonicTime(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec + now.tv_nsec / 1e9;
+}
+
+static void vpDisplayFinish(NSMutableDictionary *capture, NSMutableDictionary *report,
+                           void (^completion)(NSDictionary *)) {
+    id ownedMonitor = capture[@"owned_monitor"];
+    @try {
+        if (ownedMonitor && vpDisplayObjectSignature(ownedMonitor, @"invalidate", @encode(void), @[], capture[@"runtime"])) {
+            ((void (*)(id, SEL))objc_msgSend)(ownedMonitor, sel_registerName("invalidate"));
+        }
+    } @catch (NSException *exception) {
+        report[@"available"] = @NO;
+        report[@"geometry_available"] = @NO;
+        report[@"frontmost_bundle_id"] = NSNull.null;
+        report[@"monitors"] = @[];
+        report[@"reason"] = exception.reason ?: @"Owned monitor cleanup failed";
+    } @finally {
+        // Drop the owned reference on main, after invalidate has returned.
+        [capture removeObjectForKey:@"owned_monitor"];
+        ownedMonitor = nil;
+    }
+    completion(report);
+}
+
+static void vpDisplaySample(NSString *frontmostBundleID, NSMutableDictionary *capture,
+                           BOOL (^cancelled)(void), void (^completion)(NSDictionary *)) {
+    // Every sample and owned-monitor cleanup runs on main. dispatch_after
+    // yields to its run loop so the service can deliver its initial state.
+    if (cancelled()) {
+        vpDisplayFinish(capture, [vpDisplayUnavailable(@"Layout observation cancelled", @"cancelled") mutableCopy], completion);
+        return;
+    }
+    double elapsed = vpDisplayMonotonicTime() - [capture[@"started_at"] doubleValue];
+    NSUInteger samples = [capture[@"sample_count"] unsignedIntegerValue];
+    BOOL expired = samples > 0 && elapsed >= 1.2;
+    NSMutableDictionary *report;
+    if (expired) {
+        report = [capture[@"last_report"] mutableCopy];
+    } else {
+        report = [vpDisplayCapture(frontmostBundleID, capture) mutableCopy];
+        capture[@"last_report"] = report;
+        capture[@"sample_count"] = @(++samples);
+        elapsed = vpDisplayMonotonicTime() - [capture[@"started_at"] doubleValue];
+    }
+    BOOL available = [report[@"available"] boolValue];
+    BOOL canObserve = capture[@"owned_monitor"] && ![capture[@"failed"] boolValue];
+    if (!available && canObserve && elapsed < 1.2 && !cancelled()) {
+        int64_t delay = (int64_t)(fmin(0.05, 1.2 - elapsed) * NSEC_PER_SEC);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_main_queue(), ^{
+            @autoreleasepool { vpDisplaySample(frontmostBundleID, capture, cancelled, completion); }
+        });
+        return;
+    }
+    NSString *state = available ? @"available" : canObserve ? @"initial_layout_deadline" : @"unavailable";
+    report[@"observation"] = @{
+        @"state": state, @"sample_count": @(samples), @"elapsed_ms": @(elapsed * 1000),
+        @"limit_ms": @1200, @"sample_interval_ms": @50,
+    };
+    if (!available && canObserve) report[@"reason"] = @"No initial FrontBoard layout observed before the observation deadline";
+    vpDisplayFinish(capture, report, completion);
+}
+
 NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
+    if (NSThread.isMainThread) {
+        return vpDisplayUnavailable(@"Asynchronous layout observation requires a background caller", @"main_thread_caller");
+    }
     static dispatch_semaphore_t slot;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ slot = dispatch_semaphore_create(1); });
     if (dispatch_semaphore_wait(slot, DISPATCH_TIME_NOW) != 0) {
         return vpDisplayUnavailable(@"Another layout capture is pending or running", @"busy");
-    }
-    if (NSThread.isMainThread) {
-        @try { return vpDisplayCapture(frontmostBundleID); }
-        @finally { dispatch_semaphore_signal(slot); }
     }
     NSLock *lock = [NSLock new];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
@@ -336,19 +399,26 @@ NSDictionary<NSString *, id> *vp_display_layout(NSString *frontmostBundleID) {
         started = YES;
         [lock unlock];
         @autoreleasepool {
-            NSDictionary *capture = vpDisplayCapture(frontmostBundleID);
-            [lock lock];
-            result = capture;
-            [lock unlock];
+            NSMutableDictionary *capture = [NSMutableDictionary dictionaryWithObject:@(vpDisplayMonotonicTime()) forKey:@"started_at"];
+            vpDisplaySample(frontmostBundleID, capture, ^BOOL {
+                [lock lock];
+                BOOL value = cancelled;
+                [lock unlock];
+                return value;
+            }, ^(NSDictionary *report) {
+                [lock lock];
+                result = report;
+                [lock unlock];
+                dispatch_semaphore_signal(done);
+                dispatch_semaphore_signal(slot);
+            });
         }
-        dispatch_semaphore_signal(done);
-        dispatch_semaphore_signal(slot);
     });
     // Only this background queue/completion wait is bounded. It cannot bound
-    // the caller's foreground reads or a direct main-thread call. Once a
-    // private call starts it cannot be forcibly cancelled; keep the slot
+    // the caller's foreground reads. Direct main-thread callers are rejected.
+    // Once a private call starts it cannot be forcibly cancelled; keep the slot
     // occupied until that capture finishes.
-    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC)) != 0) {
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) != 0) {
         [lock lock];
         cancelled = YES;
         BOOL running = started;
