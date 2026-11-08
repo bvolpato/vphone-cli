@@ -117,6 +117,19 @@ jobs:
             .build/XcodeBundle/Build/Products/Release/VPhone.bundle \
             "vphone-linux-resources-${GITHUB_SHA}.zip"
 
+      - name: Verify Linux backend extraction contract
+        run: |
+          set -euo pipefail
+          backend="$RUNNER_TEMP/linux-backend-contract"
+          git init --quiet "$backend"
+          git -C "$backend" fetch --quiet --depth=1 \
+            https://github.com/bvolpato/vphone-linux.git \
+            7803767f73377d6a50ace73c5a5adaf156830cfa
+          git -C "$backend" checkout --quiet --detach FETCH_HEAD
+          zsh VPhoneExecutable/VPhoneVirtualization/Build/CheckLinuxResourceContract.sh \
+            "$backend" "vphone-linux-resources-${GITHUB_SHA}.zip" \
+            .build/XcodeBundle/Build/Products/Release/VPhone.bundle
+
       - name: Package unsigned vphone-launchpad.app
         run: |
           set -euo pipefail
@@ -134,7 +147,7 @@ jobs:
             --arg worker_sha256 "$(shasum -a 256 "$bundle/Contents/Resources/guest-resources/vphoned" | awk '{print $1}')" \
             --arg linux_resources_sha256 "$(shasum -a 256 "vphone-linux-resources-${GITHUB_SHA}.zip" | awk '{print $1}')" \
             --slurpfile daemon_pins VPhoneDaemon/VPhoneDaemon.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved \
-            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle, separate unsigned launchpad and Linux guest resources",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,linux_resources_sha256:$linux_resources_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins}' \
+            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle, separate unsigned launchpad and Linux guest resources",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,linux_resources_sha256:$linux_resources_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins,backend_contract_revision:"7803767f73377d6a50ace73c5a5adaf156830cfa"}' \
             > bundle-manifest.json
 
       - name: Upload Release packages

@@ -9,7 +9,7 @@ output=${2:?usage: PackageLinuxResources.sh VPhone.bundle output.zip}
 resources="$bundle/Contents/Resources"
 temporary=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/vphone-linux-resources.XXXXXX")
 trap '/bin/rm -rf "$temporary"' EXIT
-stage="$temporary/VPhoneLinuxResources"
+stage="$temporary/VPhone.bundle"
 linux_resources="$stage/Contents/Resources"
 /bin/mkdir -p "$linux_resources/Licenses"
 for component in guest-resources OpenAVB OpenSEP; do
