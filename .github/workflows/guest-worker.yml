@@ -26,13 +26,27 @@ jobs:
       - name: Build iOS worker
         run: |
           set -euo pipefail
-          # The browser asset URL returns HTTP 504; the immutable API asset works.
+          # Browser asset URLs return HTTP 504; immutable API assets work.
           # SwiftPM's URL mirror retains the dependency manifest's checksum.
           export SWIFTPM_MIRROR_CONFIG="$RUNNER_TEMP/guest-worker-mirrors.json"
           jq -n \
-            --arg original https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip \
-            --arg mirror https://api.github.com/repos/Lakr233/libarchive.xcframework/releases/assets/544687728.zip \
-            '{version:1,object:[{original:$original,mirror:$mirror}]}' > "$SWIFTPM_MIRROR_CONFIG"
+            --arg amdl https://github.com/Lakr233/AppleMobileDeviceLibrary/releases/download/storage.46A6477C-63BC-448A-8EB1-D7A06EC9407D \
+            '{version:1,object:[
+              {original:"https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip",
+               mirror:"https://api.github.com/repos/Lakr233/libarchive.xcframework/releases/assets/544687728.zip"},
+              {original:($amdl+"/libplist.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647013.zip"},
+              {original:($amdl+"/libimobiledevice.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647021.zip"},
+              {original:($amdl+"/libimobiledevice_glue.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647023.zip"},
+              {original:($amdl+"/libusbmuxd.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647014.zip"},
+              {original:($amdl+"/libtatsu.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647020.zip"},
+              {original:"https://github.com/Lakr233/openssl-spm/releases/download/storage.3.6.2/libssl.xcframework.zip",
+               mirror:"https://api.github.com/repos/Lakr233/openssl-spm/releases/assets/391356290.zip"}
+            ]}' > "$SWIFTPM_MIRROR_CONFIG"
           xcodebuild -project VPhoneDaemon/VPhoneDaemon.xcodeproj \
             -scheme vphoned -configuration Release -sdk iphoneos \
             -derivedDataPath .build/GuestWorker -jobs 4 \
