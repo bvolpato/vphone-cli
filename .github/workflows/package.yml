@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      SWIFTPM_NETRC_DATA: "machine api.github.com login x-access-token password ${{ github.token }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +29,7 @@ jobs:
           set -euo pipefail
           mirror_config="$RUNNER_TEMP/bundle-mirrors.json"
           jq -n \
+            --arg run "$GITHUB_RUN_ID" \
             --arg amdl https://github.com/Lakr233/AppleMobileDeviceLibrary/releases/download/storage.46A6477C-63BC-448A-8EB1-D7A06EC9407D \
             '{version:1,object:[
               {original:"https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip",
@@ -44,7 +46,7 @@ jobs:
                mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647020.zip"},
               {original:"https://github.com/Lakr233/openssl-spm/releases/download/storage.3.6.2/libssl.xcframework.zip",
                mirror:"https://api.github.com/repos/Lakr233/openssl-spm/releases/assets/391356290.zip"}
-            ]}' > "$mirror_config"
+            ]} | .object |= map(.mirror += ("?vphone_run=" + $run))' > "$mirror_config"
           echo "SWIFTPM_MIRROR_CONFIG=$mirror_config" >> "$GITHUB_ENV"
 
       - name: Native display and worker regressions
@@ -58,21 +60,27 @@ jobs:
       - name: DriverKit and patch catalogue regressions
         run: |
           set -o pipefail
-          xcodebuild -workspace VPhone.xcworkspace \
+          xcodebuild -hideShellScriptEnvironment -project VPhoneKit/VPhoneKit.xcodeproj \
+            -scheme VPhoneArchiveKit -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/XcodeKit -jobs 4 CODE_SIGNING_ALLOWED=NO build \
+            2>&1 | tee firmware-tests.log
+          xcodebuild -hideShellScriptEnvironment -workspace VPhone.xcworkspace \
             -scheme FirmwarePatcherTests -configuration Debug \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath .build/XcodeFirmwareTests -jobs 4 \
             -only-testing:FirmwarePatcherTests/CustomFirmwareDriverKitTests \
+            -only-testing:FirmwarePatcherTests/CustomFirmwareLocationdCohortingTests \
             -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
             -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
-            2>&1 | tee firmware-tests.log
+            2>&1 | tee -a firmware-tests.log
 
       - name: Build VPhone.bundle
         env:
           SWIFT_JOBS: "4"
         run: |
           set -o pipefail
-          xcodebuild -workspace VPhone.xcworkspace -scheme VPhone \
+          xcodebuild -hideShellScriptEnvironment -workspace VPhone.xcworkspace -scheme VPhone \
             -configuration Release -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath .build/XcodeBundle -jobs 4 build \
             2>&1 | tee vphone-build.log
@@ -102,7 +110,7 @@ jobs:
       - name: Build vphone-launchpad.app
         run: |
           set -o pipefail
-          xcodebuild -project VPhoneLaunchpad/VPhoneLaunchpad.xcodeproj \
+          xcodebuild -hideShellScriptEnvironment -project VPhoneLaunchpad/VPhoneLaunchpad.xcodeproj \
             -scheme VPhoneLaunchpad -configuration Release \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath .build/XcodeLaunchpad build \
