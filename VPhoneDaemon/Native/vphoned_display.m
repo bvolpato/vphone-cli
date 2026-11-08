@@ -342,13 +342,17 @@ static NSDictionary *vpDisplayCapture(NSString *frontmostBundleID, NSMutableDict
             if ([displayObjects isKindOfClass:NSArray.class]) {
                 for (id display in displayObjects) {
                     NSMutableDictionary *item = [NSMutableDictionary dictionary];
-                    for (NSString *key in @[@"displayId", @"displayType", @"pointScale",
-                                           @"currentOrientation", @"nativeOrientation"]) {
+                    for (NSString *key in @[@"displayId", @"displayType", @"pointScale"]) {
                         NSNumber *value = vpDisplayNumber(display, key, runtime);
                         if (value && isfinite(value.doubleValue)) item[key] = value;
                     }
                     for (NSString *key in @[@"name", @"deviceName"]) {
                         NSString *value = vpDisplayString(display, key, 128, runtime);
+                        if (value) item[key] = value;
+                    }
+                    for (NSString *key in @[@"currentOrientation", @"nativeOrientation"]) {
+                        NSNumber *number = vpDisplayNumber(display, key, runtime);
+                        id value = number ?: vpDisplayString(display, key, 32, runtime);
                         if (value) item[key] = value;
                     }
                     NSDictionary *bounds = vpDisplayRect(display, @"bounds", runtime);
