@@ -131,6 +131,12 @@ done
     print -u2 "Missing native KDK extraction licence"
     exit 1
 }
+for name in Dynamic-Apache-2.0.txt Dynamic-NOTICE.txt; do
+    /usr/bin/cmp "$root/VPhoneExecutable/VPhoneVirtualization/Resources/Licenses/$name" "$resources/Licenses/$name" || {
+        print -u2 "Missing or changed Dynamic notice: $name"
+        exit 1
+    }
+done
 "$root/scripts/stage-package-notices.zsh" --check "$resources/Licenses/packages"
 for component in MobileRecoveryCore MobileRestoreCore; do
     [[ -s "$resources/Licenses/vendor/$component/COPYING" ]] || {
