@@ -24,11 +24,19 @@ extension GuestAPI {
         // Explicit points target the display, including Home and System UI.
         // AX-derived coordinates additionally need a verified app scene.
         let requireForeground = method.hasPrefix("ui.") || method == "accessibility.tree"
-        return try interfaceGeometry(from: foregroundDisplayLayout(), requireForeground: requireForeground)
+        return try requireForeground
+            ? interfaceGeometry(from: foregroundDisplayLayout(), requireForeground: true)
+            : activeDisplayGeometry()
+    }
+
+    /// Display coordinates do not need a foreground application. In particular,
+    /// avoid RunningBoard/SBS queries while a fold is changing that application.
+    static func activeDisplayGeometry() throws -> InterfaceGeometry {
+        try interfaceGeometry(from: vp_display_layout(nil), requireForeground: false)
     }
 
     static func activeScreenInfo() throws -> [String: Any] {
-        let geometry = try interfaceGeometry(from: foregroundDisplayLayout(), requireForeground: false)
+        let geometry = try activeDisplayGeometry()
         return withInterfaceGeometry(geometry) { screenInfo() }
     }
 
@@ -44,7 +52,7 @@ extension GuestAPI {
     }
 
     static func requireCaptureCoordinateCompatibility() throws {
-        let active = try interfaceGeometry(from: foregroundDisplayLayout(), requireForeground: false)
+        let active = try activeDisplayGeometry()
         try requireCaptureCoordinateCompatibility(active: active, legacy: screenInfo())
     }
 

@@ -118,7 +118,7 @@ extension GuestAPI {
             rotation["accelerometer"] = vp_accelerometer_get()
             return rotation
         case "display.orientation":
-            return interfaceOrientation()
+            return try interfaceOrientation()
         case "display.posture":
             return try setDevicePose(params)
         case "display.pose":
@@ -169,20 +169,26 @@ extension GuestAPI {
         }
     }
 
-    /// Reads SpringBoard directly; the UIScreen path can abort before display registration.
+    /// Reads the active FrontBoard display, without AX or foreground queries.
     /// A foldable guest adds the angle its last fold settled at, so a host
     /// polling the orientation also follows folds it did not ask for (Xcode's
     /// DeviceHub).
-    private static func interfaceOrientation() -> [String: Any] {
+    private static func interfaceOrientation() throws -> [String: Any] {
+        let geometry = try activeDisplayGeometry()
         var reply: [String: Any] = [
-            "degrees": interfaceRotationDegrees().map { $0 as Any } ?? NSNull(),
-            "source": "springboard",
+            "degrees": geometry.orientation,
+            "source": "frontboard",
         ]
         if let angle = settledFoldAngle() {
             reply["fold_angle"] = angle
             // The window covers the panel while it is off: coming on, it
             // shows its last frame from before until the guest draws again.
-            reply["screen_off"] = GuestScreenUnlock.screenIsOff
+            guard let notification = try? darwinNotificationState("com.apple.springboard.hasBlankedScreen"),
+                  let state = notification["state"] as? NSNumber,
+                  CFGetTypeID(state) != CFBooleanGetTypeID(), let blanked = UInt64(state.stringValue) else {
+                throw IcliError.unavailable("Screen blanking state is unavailable")
+            }
+            reply["screen_off"] = blanked != 0
         }
         return reply
     }
