@@ -16,9 +16,42 @@ jobs:
   package:
     if: inputs.component != 'worker'
     runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure immutable binary artifact mirrors
+        run: |
+          set -euo pipefail
+          mirror_config="$RUNNER_TEMP/bundle-mirrors.json"
+          jq -n \
+            --arg amdl https://github.com/Lakr233/AppleMobileDeviceLibrary/releases/download/storage.46A6477C-63BC-448A-8EB1-D7A06EC9407D \
+            '{version:1,object:[
+              {original:"https://github.com/Lakr233/libarchive.xcframework/releases/download/upstream.27cbc7827172.2/libarchive.xcframework.zip",
+               mirror:"https://api.github.com/repos/Lakr233/libarchive.xcframework/releases/assets/544687728.zip"},
+              {original:($amdl+"/libplist.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647013.zip"},
+              {original:($amdl+"/libimobiledevice.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647021.zip"},
+              {original:($amdl+"/libimobiledevice_glue.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647023.zip"},
+              {original:($amdl+"/libusbmuxd.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647014.zip"},
+              {original:($amdl+"/libtatsu.xcframework.zip"),
+               mirror:"https://api.github.com/repos/Lakr233/AppleMobileDeviceLibrary/releases/assets/585647020.zip"},
+              {original:"https://github.com/Lakr233/openssl-spm/releases/download/storage.3.6.2/libssl.xcframework.zip",
+               mirror:"https://api.github.com/repos/Lakr233/openssl-spm/releases/assets/391356290.zip"}
+            ]}' > "$mirror_config"
+          echo "SWIFTPM_MIRROR_CONFIG=$mirror_config" >> "$GITHUB_ENV"
+
+      - name: Native display and worker regressions
+        run: |
+          zsh VPhoneDaemon/Tests/run-display-layout-tests.sh
+          zsh VPhoneDaemon/Tests/run-display-capture-tests.sh
+          zsh VPhoneDaemon/Tests/run-cached-binary-identity-tests.sh
+          sh VPhoneDaemon/Tests/run-health-tests.sh
 
       - name: Build VPhone.bundle
         env:
@@ -43,6 +76,18 @@ jobs:
           done
           ditto -c -k --keepParent "$bundle" "VPhone-${GITHUB_SHA}.zip"
 
+      - name: DriverKit and patch catalogue regressions
+        run: |
+          set -o pipefail
+          xcodebuild -project VPhoneExecutable/VPhoneCommand/VPhoneCommand.xcodeproj \
+            -scheme FirmwarePatcherTests -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/XcodeCommand -jobs 4 \
+            -only-testing:FirmwarePatcherTests/CustomFirmwareDriverKitTests \
+            -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
+            -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
+            2>&1 | tee firmware-tests.log
+
       - name: Build vphone-launchpad.app
         run: |
           set -o pipefail
@@ -58,6 +103,19 @@ jobs:
           app=.build/XcodeLaunchpad/Build/Products/Release/vphone-launchpad.app
           ditto -c -k --keepParent "$app" "vphone-launchpad-${GITHUB_SHA}.zip"
 
+      - name: Record bundle provenance
+        run: |
+          set -euo pipefail
+          bundle=.build/XcodeBundle/Build/Products/Release/VPhone.bundle
+          jq -n --arg source "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg sdk "$(xcrun --sdk iphoneos --show-sdk-version)" \
+            --arg bundle_sha256 "$(shasum -a 256 "VPhone-${GITHUB_SHA}.zip" | awk '{print $1}')" \
+            --arg launchpad_sha256 "$(shasum -a 256 "vphone-launchpad-${GITHUB_SHA}.zip" | awk '{print $1}')" \
+            --arg worker_sha256 "$(shasum -a 256 "$bundle/Contents/Resources/guest-resources/vphoned" | awk '{print $1}')" \
+            --slurpfile daemon_pins VPhoneDaemon/VPhoneDaemon.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved \
+            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle and separate unsigned launchpad",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins}' \
+            > bundle-manifest.json
+
       - name: Upload Release packages
         uses: actions/upload-artifact@v4
         with:
@@ -65,6 +123,7 @@ jobs:
           path: |
             VPhone-${{ github.sha }}.zip
             vphone-launchpad-${{ github.sha }}.zip
+            bundle-manifest.json
           if-no-files-found: error
           retention-days: 7
 
@@ -76,6 +135,7 @@ jobs:
           path: |
             vphone-build.log
             launchpad-build.log
+            firmware-tests.log
           if-no-files-found: ignore
 
   worker:
