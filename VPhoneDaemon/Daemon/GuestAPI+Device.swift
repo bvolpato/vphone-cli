@@ -14,7 +14,7 @@ extension GuestAPI {
             var info = try collectDeviceSnapshot()
             info["jailbreak"] = jailbreakInfo()
             info["network"] = networkInfo()
-            info["screen"] = screenInfo()
+            info["screen"] = activeScreenState()
             info["rotation"] = rotationInfo()
             info["brightness"] = brightnessState()
             info["volume"] = volume()
@@ -68,29 +68,7 @@ extension GuestAPI {
         case "display.modes":
             return vp_display_modes()
         case "display.layout":
-            let foreground = frontmostApp()
-            let bundleID = foreground["verified"] as? Bool == true
-                ? foreground["bundle_id"] as? String
-                : nil
-            var layout = vp_display_layout(bundleID)
-            let after = frontmostApp()
-            let stable = bundleID?.isEmpty == false
-                && after["verified"] as? Bool == true
-                && after["bundle_id"] as? String == bundleID
-            layout["foreground_bundle_verified"] = stable
-            layout["foreground_verification"] = stable
-                ? "bundle_only_matched_before_and_after_non_atomic"
-                : "bundle_unverified_or_changed"
-            if !stable {
-                layout["frontmost_bundle_id"] = NSNull()
-                layout["monitors"] = (layout["monitors"] as? [[String: Any]] ?? []).map { monitor in
-                    var monitor = monitor
-                    monitor["foreground_scenes"] = [] as [Any]
-                    monitor["matched_scene_count"] = 0
-                    return monitor
-                }
-            }
-            return layout
+            return foregroundDisplayLayout()
         case "device.environment":
             return try environmentReport()
         case "device.basebin":

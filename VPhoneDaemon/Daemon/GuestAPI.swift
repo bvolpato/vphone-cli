@@ -165,13 +165,26 @@ enum GuestAPI {
     }
 
     static func execute(method: String, params: [String: Any]) throws -> [String: Any] {
+        if method == "ui.ocr" || method == "ui.describe" {
+            try requireCaptureCoordinateCompatibility()
+        }
+        if needsInterfaceGeometry(method, params) {
+            let geometry = try activeInterfaceGeometry(for: method)
+            return try withInterfaceGeometry(geometry) {
+                try executeUnscoped(method: method, params: params)
+            }
+        }
+        return try executeUnscoped(method: method, params: params)
+    }
+
+    private static func executeUnscoped(method: String, params: [String: Any]) throws -> [String: Any] {
         switch method {
         case "device.snapshot":
             var snapshot = try collectDeviceSnapshot()
             snapshot["jailbreak"] = jailbreakInfo()
             return snapshot
         case "device.screen":
-            return screenInfo()
+            return try activeScreenInfo()
         case "screen.screenshot":
             return try takeScreenshot(base64: true, nativeResolution: true)
         case "apps.list":
