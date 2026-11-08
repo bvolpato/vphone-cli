@@ -3317,6 +3317,9 @@ struct VPhoneCustomFirmwareInstaller {
             repairGroup.append((FirmwareGuestSystemPatchSet.prebootFoldableDisplays, "patch-dt-foldable-displays",
                                 boardDeviceTree.map { [$0.path] } ?? []))
         }
+        if [.iPhone, .iPad].contains(guestDevice.family) {
+            repairGroup.append((FirmwareGuestSystemPatchSet.prebootVirtualUSBDriverKit, "patch-dt-driverkit", []))
+        }
         repairGroup.append((FirmwareGuestSystemPatchSet.prebootHaptics, "patch-dt-haptics", []))
         repairGroup.append((FirmwareGuestSystemPatchSet.prebootMicrophoneArray, "patch-dt-microphone-array", []))
         let repairsOn = repairGroup.filter { enabled($0.id) }
