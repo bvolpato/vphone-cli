@@ -48,6 +48,7 @@ jobs:
 
       - name: Native display and worker regressions
         run: |
+          zsh scripts/tests/stage-package-notices-tests.zsh
           zsh VPhoneDaemon/Tests/run-display-layout-tests.sh
           zsh VPhoneDaemon/Tests/run-display-capture-tests.sh
           zsh VPhoneDaemon/Tests/run-cached-binary-identity-tests.sh
@@ -62,6 +63,15 @@ jobs:
             -configuration Release -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath .build/XcodeBundle -jobs 4 build \
             2>&1 | tee vphone-build.log
+
+      - name: Verify resolved dependency pins
+        run: |
+          set -euo pipefail
+          while IFS= read -r resolved; do
+            diff -u \
+              <(git show "HEAD:$resolved" | jq -S '.pins | sort_by(.identity)') \
+              <(jq -S '.pins | sort_by(.identity)' "$resolved")
+          done < <(git ls-files '*Package.resolved')
 
       - name: Validate and package VPhone.bundle
         run: |
@@ -80,9 +90,9 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild -project VPhoneExecutable/VPhoneCommand/VPhoneCommand.xcodeproj \
-            -scheme FirmwarePatcherTests -configuration Release \
+            -scheme FirmwarePatcherTests -configuration Debug \
             -destination 'platform=macOS,arch=arm64' \
-            -derivedDataPath .build/XcodeCommand -jobs 4 \
+            -derivedDataPath .build/XcodeFirmwareTests -jobs 4 \
             -only-testing:FirmwarePatcherTests/CustomFirmwareDriverKitTests \
             -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
             -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
