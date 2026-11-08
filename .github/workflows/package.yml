@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      CAPTURE_SCHEMA_EXTRACTOR_REVISION: cd3996ad8b44f486dd619bacb3a584e671c8ae1f
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +69,19 @@ jobs:
             -only-testing:FirmwarePatcherTests/DeviceTreeGuestDeviceTests \
             -only-testing:FirmwarePatcherTests/FirmwarePatchSetCatalogTests test \
             2>&1 | tee -a firmware-tests.log
+
+      - name: Verify pinned capture result schema
+        run: |
+          set -euo pipefail
+          extractor="$RUNNER_TEMP/capture-schema-extractor"
+          git init --quiet "$extractor"
+          git -C "$extractor" fetch --quiet --depth=1 \
+            https://github.com/bvolpato/vphone-cli.git "$CAPTURE_SCHEMA_EXTRACTOR_REVISION"
+          git -C "$extractor" checkout --quiet --detach FETCH_HEAD
+          zsh VPhoneDaemon/Tests/run-display-capture-schema-check.sh \
+            "$extractor" "$CAPTURE_SCHEMA_EXTRACTOR_REVISION"
+          syntax="$extractor/VPhoneDaemon/Tests/ResultSchema/.build/checkouts/swift-syntax"
+          echo "CAPTURE_SCHEMA_SWIFTSYNTAX_REVISION=$(git -C "$syntax" rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Build VPhone.bundle
         env:
@@ -146,8 +160,10 @@ jobs:
             --arg launchpad_sha256 "$(shasum -a 256 "vphone-launchpad-${GITHUB_SHA}.zip" | awk '{print $1}')" \
             --arg worker_sha256 "$(shasum -a 256 "$bundle/Contents/Resources/guest-resources/vphoned" | awk '{print $1}')" \
             --arg linux_resources_sha256 "$(shasum -a 256 "vphone-linux-resources-${GITHUB_SHA}.zip" | awk '{print $1}')" \
+            --arg schema_extractor "$CAPTURE_SCHEMA_EXTRACTOR_REVISION" \
+            --arg schema_syntax "$CAPTURE_SCHEMA_SWIFTSYNTAX_REVISION" \
             --slurpfile daemon_pins VPhoneDaemon/VPhoneDaemon.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved \
-            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle, separate unsigned launchpad and Linux guest resources",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,linux_resources_sha256:$linux_resources_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins,backend_contract_revision:"7803767f73377d6a50ace73c5a5adaf156830cfa"}' \
+            '{source_revision:$source,run_id:$run,sdk:$sdk,architecture:"arm64",scope:"full bundle, separate unsigned launchpad and Linux guest resources",bundle_sha256:$bundle_sha256,launchpad_sha256:$launchpad_sha256,linux_resources_sha256:$linux_resources_sha256,worker_sha256:$worker_sha256,daemon_pins:$daemon_pins[0].pins,backend_contract_revision:"7803767f73377d6a50ace73c5a5adaf156830cfa",capture_schema_validation:{extractor_revision:$schema_extractor,swift_syntax_revision:$schema_syntax}}' \
             > bundle-manifest.json
 
       - name: Upload Release packages
