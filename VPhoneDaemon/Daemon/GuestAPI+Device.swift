@@ -69,6 +69,8 @@ extension GuestAPI {
             return vp_display_modes()
         case "display.layout":
             return foregroundDisplayLayout()
+        case "display.metrics":
+            return GuestDisplayMetrics.report(from: vp_display_layout(nil))
         case "device.environment":
             return try environmentReport()
         case "device.basebin":
