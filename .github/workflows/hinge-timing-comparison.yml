@@ -1,0 +1,72 @@
+name: Hinge timing comparison
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test monotonic sweep timing
+        run: |
+          set -euo pipefail
+          xcrun --sdk macosx clang -std=c11 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined \
+            VPhoneGuestComponents/Tests/HingeSweepTests.c \
+            VPhoneGuestComponents/Hinge/VPhoneHingeSweep.c -lm \
+            -o "$RUNNER_TEMP/hinge-sweep-tests"
+          "$RUNNER_TEMP/hinge-sweep-tests"
+
+      - name: Build paired iOS hinge libraries
+        run: |
+          set -euo pipefail
+          baseline=83197152137ddd2aad70eb121d6b88a9afbee36e
+          baseline_dir="$RUNNER_TEMP/hinge-baseline"
+          out="$PWD/hinge-comparison"
+          mkdir -p "$out"
+          git worktree add --detach "$baseline_dir" "$baseline"
+          for variant in baseline candidate; do
+            checkout="$PWD"
+            if [[ "$variant" == baseline ]]; then checkout="$baseline_dir"; fi
+            artifact="$checkout/.build/siblings/stage/hinge/libvphonehinge.dylib"
+            make -C "$checkout/VPhoneGuestComponents" "$artifact"
+            codesign --verify --strict "$artifact"
+            cp "$artifact" "$out/$variant.dylib"
+            codesign -dvv "$artifact" 2> "$out/$variant.codesign.txt"
+            otool -l "$artifact" > "$out/$variant.load-commands.txt"
+            (cd "$checkout" && git ls-files VPhoneGuestComponents/Hinge | \
+              while IFS= read -r source; do shasum -a 256 "$source"; done) \
+              > "$out/$variant.sources.sha256"
+          done
+          git diff "$baseline" -- VPhoneGuestComponents/Hinge > "$out/timing.patch"
+          jq -n \
+            --arg source_commit "$GITHUB_SHA" \
+            --arg baseline_commit "$baseline" \
+            --arg xcode "$(xcodebuild -version)" \
+            --arg compiler "$(xcrun --sdk iphoneos clang --version)" \
+            --arg sdk "$(xcrun --sdk iphoneos --show-sdk-version)" \
+            --arg sdk_build "$(xcrun --sdk iphoneos --show-sdk-build-version)" \
+            --arg baseline_sha256 "$(shasum -a 256 "$out/baseline.dylib" | cut -d' ' -f1)" \
+            --arg candidate_sha256 "$(shasum -a 256 "$out/candidate.dylib" | cut -d' ' -f1)" \
+            --arg patch_sha256 "$(shasum -a 256 "$out/timing.patch" | cut -d' ' -f1)" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{source_commit:$source_commit, baseline_commit:$baseline_commit,
+              xcode:$xcode, compiler:$compiler, sdk:$sdk, sdk_build:$sdk_build,
+              baseline_sha256:$baseline_sha256, candidate_sha256:$candidate_sha256,
+              patch_sha256:$patch_sha256, run_url:$run_url,
+              architecture:"arm64e", deployment_target:"18.0", signing:"ad hoc"}' \
+            > "$out/provenance.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hinge-timing-${{ github.sha }}
+          path: hinge-comparison/
+          if-no-files-found: error
+          retention-days: 7
