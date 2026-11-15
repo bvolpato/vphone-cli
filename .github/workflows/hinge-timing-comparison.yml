@@ -2,6 +2,8 @@ name: Hinge timing comparison
 
 on:
   workflow_dispatch:
+  push:
+    branches: [bvolpato/hinge-timing-runtime-proof]
 
 permissions:
   contents: read
